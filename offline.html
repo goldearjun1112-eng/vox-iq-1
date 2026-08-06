@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VoxIQ — Offline</title>
+<style>
+  body{
+    margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+    background:#171613; color:#F2EDE4; font-family:system-ui, sans-serif; text-align:center; padding:24px;
+  }
+  .box{max-width:340px;}
+  h1{font-size:18px; margin:0 0 10px;}
+  p{font-size:14px; color:#A69C8C; line-height:1.6; margin:0 0 18px;}
+  button{
+    background:#E0A339; color:#1A1509; border:none; border-radius:999px;
+    padding:10px 20px; font-size:14px; font-weight:600; cursor:pointer;
+  }
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>No connection</h1>
+    <p>VoxIQ needs the internet for both live transcription and AI analysis — there's no offline mode for recording. Reconnect and reload.</p>
+    <button onclick="location.reload()">Retry</button>
+  </div>
+</body>
+</html>
