@@ -1,70 +1,74 @@
 # VoxIQ — PWA package (on-device AI, no API key)
 
-## What changed from the API-key version
-Analysis no longer calls Anthropic (or anyone else). It runs a small language
-model — `onnx-community/Qwen2.5-0.5B-Instruct` — directly in the browser via
-[Transformers.js](https://github.com/huggingface/transformers.js), loaded from
-the jsdelivr CDN. There is no key to store, no key to leak, and no server in
-the loop for analysis.
+## Model: LFM2-1.2B-Extract
+Analysis runs entirely in the browser via
+[Transformers.js](https://github.com/huggingface/transformers.js), using
+[`onnx-community/LFM2-1.2B-Extract-ONNX`](https://huggingface.co/onnx-community/LFM2-1.2B-Extract-ONNX) —
+a model from Liquid AI trained specifically to pull structured data (JSON/XML/YAML)
+out of unstructured text against a schema. That's a better fit for this app's
+job than a general-purpose chatbot model, which is what the first on-device
+version used (Qwen2.5-0.5B-Instruct — swapped out for this reason).
+
+Two other things make it a reasonable choice for phones specifically:
+- **Architecture**: LFM2 is a hybrid conv+attention design Liquid built for
+  edge/mobile deployment — fast on WebGPU, and still efficient on CPU-only
+  (wasm) devices, unlike a plain transformer of the same parameter count.
+- **Task fit**: it defaults to JSON output and follows an explicit
+  field-by-field schema prompt (see `buildMessages()` in the module script)
+  noticeably more reliably than a general instruct model asked to "reply with
+  this JSON shape."
+
+None of this makes it accurate in an absolute sense. It's 1.2B parameters,
+quantized to 4-bit. It is not Claude. It will still get things wrong,
+especially on nuance, on longer transcripts, and on Hindi/Marathi-heavy input.
+It is meaningfully better than the 0.5B general model at *staying inside the
+schema*, which was the main failure mode before (see `fallbackAnalysis()` —
+still there as a safety net when the model's output isn't valid JSON at all).
 
 ## Files
-- `index.html` — the app. Two `<script>` blocks at the bottom: the original
-  classic script (UI/state), and a `type="module"` script that loads
-  Transformers.js and exposes `window.getLocalModel` / `window.analyzeLocally`
-  / `window.resetLocalModel` for the classic script to call.
+- `index.html` — the app. Two `<script>` blocks at the bottom: the classic
+  script (UI/state) and a `type="module"` script that loads Transformers.js
+  and exposes `window.getLocalModel` / `window.analyzeLocally` /
+  `window.resetLocalModel`.
 - `manifest.json`, `sw.js`, `offline.html`, `icons/` — unchanged PWA shell.
 
 ## Deploy
-Same as before: any static HTTPS host (GitHub Pages, Netlify, Vercel,
-Cloudflare Pages), no build step. Keep relative paths intact.
-
-Two extra domains now need to be reachable from the browser (not proxied by
-the service worker, called directly by the module script):
+Static HTTPS host, no build step. Keep relative paths intact. Two extra
+domains need to be reachable from the browser (not proxied by the service
+worker — called directly by the module script):
 - `cdn.jsdelivr.net` — the Transformers.js library
-- `huggingface.co` (and its CDN, e.g. `cdn-lfs-us-1.huggingface.co`) — the
-  model weight files
+- `huggingface.co` and its CDN — the ~700MB model weights
 
-If you're behind a restrictive corporate firewall or content-filtering
-network, these may be blocked and the model download will fail.
+Blocked on restrictive/corporate networks and the download will fail with
+whatever error the fetch surfaces in `voxiq:model-status` / the toast.
 
-## The real tradeoff: quality vs. no key
-This is a **0.5-billion-parameter** model. For comparison, Claude is orders of
-magnitude larger. Concretely, expect:
-- Frequent malformed/non-JSON output — there's a regex-based fallback
-  (`fallbackAnalysis`) that extracts the first few sentences as a crude
-  summary when this happens. The note is still saved, marked `fallback:true`,
-  and the UI shows a toast saying the output was rough.
-- Weak handling of the `aiPrompt` and `blueprint` fields specifically — these
-  need real reasoning, which a 0.5B model does poorly. Don't expect them to be
-  reliably useful; they're the fields most likely to come back empty or
-  generic.
-- Noticeably worse results on Hindi/Marathi-heavy transcripts than on English
-  ones — the model's multilingual capacity at this size is limited.
-- On first use: a **~300MB one-time download**, plus a few seconds of
-  "warm-up" while the model initializes. Say so before your users tap
-  "Download" on cellular data — there's no confirmation dialog for that in
-  the current build.
-- On low-RAM Android phones, loading a 0.5B model in a browser tab can be slow
-  or, on older/low-end devices, fail outright (tab crash / OOM). There's no
-  automatic fallback to a smaller model — if this turns out to be a problem
-  for your users, swap `MODEL_ID` in the module script for something like
-  `HuggingFaceTB/SmolLM2-360M-Instruct`, at a further cost to output quality.
+## Size and speed, concretely
+- **~700MB one-time download** (vs ~300MB for the earlier 0.5B model) —
+  roughly 2.5x. Warn users before they tap "Download" on cellular; there's no
+  confirmation dialog in the current build.
+- **WebGPU path**: reported speeds of 200+ tok/s for this model family in the
+  wild — fast enough that generation itself won't be the bottleneck once
+  loaded. WebGPU needs Chrome 113+ (desktop or Android); Firefox needs a flag;
+  Safari support is experimental.
+- **wasm/CPU fallback**: slower, but the hybrid-conv architecture is
+  specifically designed to stay usable off-GPU, unlike most same-size
+  transformer models. Still expect this path to be noticeably slower than
+  WebGPU on lower-end Android phones.
+- **RAM**: a 1.2B model is a heavier tab-memory footprint than the 0.5B one
+  was. Older/low-RAM Android devices are more likely to see the tab crash or
+  the load simply fail. There's no automatic step-down to a smaller model —
+  if that turns out to be a real problem for your users, Liquid also publishes
+  `onnx-community/LFM2-350M-Extract-ONNX`, same schema-following prompt
+  format, smaller and faster, less accurate. Swap `MODEL_ID` in the module
+  script to switch.
 
-## What actually got better
-After the first download, the model is cached by the browser (Cache Storage
-API, managed by Transformers.js itself, not by `sw.js`) and **analysis works
-fully offline** from then on — a real improvement over the API-key version,
-where every save needed a live connection.
-
-Recording still doesn't: `webkitSpeechRecognition` streams audio to Google's
-speech servers over the network regardless of PWA status, and iOS Safari
-doesn't implement it at all. Those two limitations are unchanged from before,
-and packaging can't fix either one.
-
-## sw.js note
-`sw.js` was updated to only ever delete its **own** old cache versions
-(`voxiq-shell-*`) during `activate`. The earlier version deleted *any* cache
-that wasn't its own name — which would have wiped the model's ~300MB cache
-(stored under a different name by Transformers.js) on every service worker
-update, forcing a silent re-download. Worth knowing if you fork this further:
-don't broaden that cleanup filter back out.
+## What's unchanged from the previous on-device version
+- Cached by the browser after first download (Transformers.js's own Cache
+  Storage usage, not `sw.js`) — analysis works offline after that.
+- `webkitSpeechRecognition` for live transcription still needs network
+  regardless of PWA/model status, and still doesn't exist on iOS Safari.
+  Packaging and model choice can't touch either of those.
+- `sw.js`'s `activate` handler only deletes its own old cache versions
+  (`voxiq-shell-*`) — it will not wipe the model's cache. Don't broaden that
+  filter if you fork this further; the earlier version of this file did, and
+  it would have forced a silent ~700MB re-download on every SW update.

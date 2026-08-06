@@ -338,7 +338,7 @@
       </div>
 
       <div class="banner" id="modelBanner" style="display:none;">
-        <span id="modelBannerText">First analysis downloads a small on-device AI model (~300MB, one time) so notes are analyzed on your phone — no API key, no server.</span>
+        <span id="modelBannerText">First analysis downloads an on-device AI model tuned for structured extraction (~700MB, one time) so notes are analyzed on your phone — no API key, no server.</span>
         <button onclick="preloadModel()" id="modelBannerBtn">Download</button>
       </div>
 
@@ -396,7 +396,7 @@
 <div class="overlay" id="settingsOverlay" onclick="if(event.target===this)closeSettings()">
   <div class="drawer">
     <h3>On-device AI model</h3>
-    <p>Notes are analyzed by a small language model (Qwen2.5-0.5B) that runs entirely on this device — nothing is sent to a server, no API key needed. It downloads once (~300MB) and is cached by the browser after that. Quality is noticeably rougher than a large cloud model, especially on longer or heavily Hindi/Marathi-mixed transcripts.</p>
+    <p>Notes are analyzed by LFM2-1.2B-Extract, a language model from Liquid AI purpose-built for pulling structured data out of text, running entirely on this device — nothing is sent to a server, no API key needed. It downloads once (~700MB) and is cached by the browser after that. Being extraction-specific rather than a general chatbot, it's noticeably more reliable at filling the note schema than a similarly-sized general model — but it's still far smaller than a cloud model like Claude, and quality drops on longer or heavily Hindi/Marathi-mixed transcripts.</p>
     <p id="settingsModelStatus" style="color:var(--text); font-weight:600;">Status: not loaded</p>
     <div class="progress-track" id="settingsProgressTrack" style="display:none; margin-bottom:12px;">
       <div class="progress-fill" id="settingsProgressFill"></div>
@@ -868,7 +868,14 @@ if('serviceWorker' in navigator){
 
   env.allowLocalModels = false;
 
-  const MODEL_ID = 'onnx-community/Qwen2.5-0.5B-Instruct';
+  // LFM2-1.2B-Extract: Liquid AI's model purpose-trained for exactly this job —
+  // pulling structured JSON out of unstructured text against a schema — rather
+  // than a general chatbot pressed into doing it. Hybrid conv+attention
+  // architecture, built for edge/mobile: fast on WebGPU, and unlike a plain
+  // transformer of the same size, still reasonably efficient on CPU-only (wasm)
+  // fallback. Bigger download than a 0.5B general model (~700MB vs ~300MB) but
+  // meaningfully more accurate at this specific task.
+  const MODEL_ID = 'onnx-community/LFM2-1.2B-Extract-ONNX';
   let generator = null;
   let loadingPromise = null;
 
@@ -882,7 +889,10 @@ if('serviceWorker' in navigator){
 
     const hasWebGPU = !!navigator.gpu;
     const device = hasWebGPU ? 'webgpu' : 'wasm';
-    const dtype = hasWebGPU ? 'q4f16' : 'q4';
+    // Liquid's own docs recommend q4 for this model on both backends —
+    // WebGPU here supports q4/fp16 (not q8), and CPU/wasm handles q4 fine
+    // given the hybrid-conv architecture is designed to stay efficient off-GPU.
+    const dtype = 'q4';
 
     emit('loading', 'Downloading on-device model — 0%', 0);
 
@@ -910,17 +920,24 @@ if('serviceWorker' in navigator){
   }
 
   function buildMessages(transcript, langName){
+    // Follows Liquid AI's documented prompt format for the -Extract model family:
+    // an explicit field-by-field schema with per-field descriptions gets
+    // measurably better extraction accuracy from this model than a loose
+    // "reply with this JSON shape" instruction would.
     const system =
-      "You analyze voice-note transcripts for an Indian retail trader and business builder who thinks out loud " +
-      "about trading, business operations, and projects. The transcript is in " + langName + " and may mix in English business or trading terms.\n\n" +
-      "Reply with ONLY a compact valid JSON object, no markdown fences, no preamble, no trailing text — exactly these keys:\n" +
-      '{"summary":"2-4 sentence summary in English","keyPoints":["3-6 short bullet points"],' +
-      '"aiPrompt":"a ready-to-paste prompt for an AI assistant on this exact topic",' +
-      '"blueprint":"short numbered plan if this describes a project or idea, otherwise empty string",' +
-      '"recommendations":["2-4 short next-step suggestions"]}';
+      "Identify and extract information matching the following schema from this voice-note transcript. " +
+      "Return data as a JSON object. Missing data should be omitted.\n\n" +
+      "Context: the speaker is an Indian retail trader and business builder thinking out loud about trading, " +
+      "business operations, and projects. The transcript is in " + langName + " and may mix in English business or trading terms.\n\n" +
+      "Schema:\n" +
+      '- summary: "2-4 sentence summary in English of what was said"\n' +
+      '- keyPoints: array of 3-6 short strings — key facts, decisions or action items\n' +
+      '- aiPrompt: "a ready-to-paste prompt someone could hand an AI assistant to get real help on this exact topic"\n' +
+      '- blueprint: "a short numbered plan, only if the transcript describes a project or idea worth structuring — otherwise omit this field"\n' +
+      '- recommendations: array of 2-4 short strings — concrete next-step or research suggestions';
     return [
       { role: 'system', content: system },
-      { role: 'user', content: 'Transcript:\n\n' + transcript }
+      { role: 'user', content: transcript }
     ];
   }
 
@@ -960,7 +977,7 @@ if('serviceWorker' in navigator){
     emit('analyzing', 'Analyzing your note on-device…', null);
 
     const messages = buildMessages(transcript, langName);
-    const output = await gen(messages, { max_new_tokens: 700, temperature: 0.3, do_sample: false });
+    const output = await gen(messages, { max_new_tokens: 768, do_sample: false });
 
     const result = Array.isArray(output) ? output[0] : output;
     let text = '';
